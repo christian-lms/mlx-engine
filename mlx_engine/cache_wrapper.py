@@ -46,43 +46,124 @@ class CacheWrapper:
             kv_group_size=kv_group_size,
             quantized_kv_start=quantized_kv_start,
         )
-
+    
     @staticmethod
-    def _find_common_prefix(
-        current_tokens: mx.array, prompt_tokens: mx.array, num_tokens_to_exclude: int
+    def _find_matching_sequence_length(
+        tokens1: mx.array, 
+        tokens2: mx.array, 
+        start1: int = 0,
+        start2: int = 0,
+        num_tokens_to_exclude: int = 0
     ) -> int:
         """
-        Determine the common prefix length between the current tokens and the prompt tokens.
+        Find the length of matching token sequence between two token arrays.
+        
+        TODO: regression test vs. old _find_common_prefix
 
         Args:
-            current_tokens (mx.array): The cached tokens (self.tokens).
-            prompt_tokens (mx.array): The prompt tokens.
+            tokens1: First token array
+            start1: Starting position in first array
+            tokens2: Second token array  
+            start2: Starting position in second array
             num_tokens_to_exclude (int): The minimum length of the remaining prompt tokens array.
-
+        
         Returns:
-            int: The length of the common prefix.
+            int: Length of matching sequence
         """
-        prompt_tokens = prompt_tokens
-        current_tokens = current_tokens
-        # Find the minimum length between the two arrays
-        min_length = min(len(current_tokens), len(prompt_tokens))
-
-        # Compare elements up to the minimum length
-        mask = prompt_tokens[:min_length] == current_tokens[:min_length]
-
-        # Find the index where the first mismatch occurs
+        # Calculate actual bounds
+        max_len1 = len(tokens1) - start1
+        max_len2 = len(tokens2) - start2
+        min_length = int(min(max_len1, max_len2))
+        
+        # Extract subsequences to compare
+        seq1 = tokens1[start1 : start1 + min_length]
+        seq2 = tokens2[start2 : start2 + min_length]
+        
+        # Find first mismatch
+        mask = seq1 == seq2
         if mx.any(mask == False):  # noqa E712
-            common_length = int(mx.argmax(mask == False))  # noqa E712
+            match_length = int(mx.argmax(mask == False))  # noqa E712
         else:
-            common_length = int(min_length)
-
+            match_length = min_length
+        
         # Ensure that the prompt is at least num_tokens_to_exclude long
-        uncached_prompt_tokens_length = len(prompt_tokens[common_length:])
+        uncached_prompt_tokens_length = len(prompt_tokens[match_length:])
         length_adjustment = max(
             0, num_tokens_to_exclude - uncached_prompt_tokens_length
         )
-        common_length = max(common_length - length_adjustment, 0)
-        return common_length
+        match_length = max(match_length - length_adjustment, 0)
+        return match_length
+
+    def _reuse_cache_sequences(
+        self, 
+        cached_tokens: mx.array, 
+        prompt_tokens: mx.array, 
+        common_prefix_len: int,
+        non_prefix_reuse_min_seq_len: int = 256
+    ) -> int:
+        """
+        Find and reuse non-contiguous matching sequences from the cache.
+        This is the MLX equivalent of the llama.cpp non-prefix reuse logic.
+        
+        TODO: docstring
+
+        Returns:
+            int: Number of additional tokens that were reused from cache
+        """
+        cache_size = len(cached_tokens)
+        prompt_size = len(prompt_tokens)
+        
+        # Start scanning from after the common prefix
+        cache_head_idx = common_prefix_len
+        prompt_head_idx = common_prefix_len
+        total_reused = 0
+        
+        if self.verbose:
+            print(f"Looking for non-prefix sequences of length >= {non_prefix_reuse_min_seq_len}", file=sys.stderr)
+        
+        # Scan through remaining cache and prompt to find reusable sequences
+        while cache_head_idx < cache_size and prompt_head_idx < prompt_size:
+            
+            # Find the length of matching sequence starting at current positions
+            match_length = self._find_matching_sequence_length(
+                cached_tokens, cache_head_idx,
+                prompt_tokens, prompt_head_idx
+            )
+            
+            if match_length < non_prefix_reuse_min_seq_len:
+                # Sequence too short - advance cache pointer to find next potential match
+                cache_head_idx += 1
+            else:
+                if self.verbose:
+                    print(f"Reusing {match_length} tokens from cache", file=sys.stderr)
+                
+                # Found reusable sequence - shift cache content
+                # TODO: write me...
+                self._shift_cache_sequence(
+                    source_pos=cache_head_idx,
+                    target_pos=prompt_head_idx,
+                    length=match_length
+                )
+                
+                # Move both pointers forward
+                cache_head_idx += match_length
+                prompt_head_idx += match_length
+                total_reused += match_length
+        
+        return total_reused
+    
+    def _shift_cache_sequence(
+        self, source_pos: int, target_pos: int, length: int
+    ):
+        """
+        Shift a sequence of tokens in the cache from source position to target position
+        using RoPE shifting logic.
+
+        Args:
+            source_pos (int): The starting position in the cache to copy from.
+            target_pos (int): The position in the prompt where the sequence should be copied to.
+            length (int): The number of tokens to copy.
+        """
 
     def _get_unprocessed_tokens(
         self, prompt_tokens: mx.array, num_tokens_to_exclude: int
@@ -100,13 +181,15 @@ class CacheWrapper:
         if self.tokens is None:
             self.tokens = prompt_tokens
             return self.tokens
-
+        
         # Find common KV between the last generation and the current prompt
-        common_prefix = self._find_common_prefix(
-            self.tokens, prompt_tokens, num_tokens_to_exclude
+        common_prefix = self._find_matching_sequence_length(
+            self.tokens, prompt_tokens, num_tokens_to_exclude=num_tokens_to_exclude
         )
 
         # Trim the cache if the common prefix is shorter than the current cache
+        print(f"Common prefix length: {common_prefix}", file=sys.stderr)
+        print(f"Current cache offset: {self.cache[0].offset}", file=sys.stderr)
         num_tokens_to_trim = self.cache[0].offset - common_prefix
         if num_tokens_to_trim > 0:
             if not can_trim_prompt_cache(self.cache):
@@ -134,12 +217,20 @@ class CacheWrapper:
                 message=f"Trimmed {num_tokens_to_trim} tokens from the prompt cache",
             )
 
+        # attempt to reuse remaining cache after the common prefix
+        reused_tokens = self._reuse_cache_sequences(
+            prompt_tokens=prompt_tokens,
+            common_prefix_len=common_prefix,
+            non_prefix_reuse_min_seq_len=getattr(self, 'min_reuse_length', 256)  # TODO pipe me in
+        )
+
         # Keep track of the prompt tokens
         self.tokens = prompt_tokens
 
         if self.verbose:
             print(f"Common prefix length: {common_prefix}", file=sys.stderr)
             print(f"Trimmed tokens: {num_tokens_to_trim}", file=sys.stderr)
+            print(f"Additional reused tokens: {reused_tokens}", file=sys.stderr)
 
         # All of the common tokens are now in the cache, so we can return the remaining tokens that still need to be processed
         return prompt_tokens[common_prefix:]
@@ -248,6 +339,7 @@ class CacheWrapper:
             prompt_tokens (mx.array): The prompt tokens.
             prompt_progress_callback (Callable): A callback function to report prompt processing progress.
             num_tokens_to_exclude (int): The number of tokens that should not be added to the cache.
+                Should always be at least 1 so that the last token will be processed to kick off generation.
 
         Returns:
             mx.array: The prompt tokens to be used for the next generation.
