@@ -78,9 +78,6 @@ class TrimmableRotatingKVCache(RotatingKVCache):
         
         return trim_count
 
-    def set_keep(keep: int)
-        self.keep = keep
-
 
 def make_prompt_cache(
     model: nn.Module,
@@ -206,7 +203,8 @@ class CacheWrapper:
         )
 
         # Trim the cache if the common prefix is shorter than the current cache
-        num_tokens_to_trim = self.cache[0].offset - common_prefix
+        # TODO(christian-lms): this is dangerous to access in the general case
+        num_tokens_to_trim = self.cache[0].keys.shape[2] - common_prefix
         if num_tokens_to_trim > 0:
             if not can_trim_prompt_cache(self.cache):
                 log_warn(
@@ -332,12 +330,17 @@ class CacheWrapper:
         self.draft_model = None
         self.cache = self.cache[: len(self.model.layers)]
 
+    def update_keep(self, n_keep: int):
+        for c in self.cache:
+            setattr(c, "keep", n_keep)
+
     def update_cache(
         self,
         prompt_tokens: mx.array,
         prompt_progress_callback,
         *,
         num_tokens_to_exclude: int = 1,
+        n_keep: int = 4,
     ) -> mx.array:
         """
         Set up the KV cache for the next generation.
@@ -355,6 +358,8 @@ class CacheWrapper:
 
             def prompt_progress_callback(x):
                 return None
+
+        self.update_keep(n_keep)
 
         num_tokens_to_exclude = max(num_tokens_to_exclude, 1)
         prompt_tokens = self._get_unprocessed_tokens(
