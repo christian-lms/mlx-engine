@@ -359,6 +359,7 @@ class CacheWrapper:
             def prompt_progress_callback(x):
                 return None
 
+        # TODO(christian-lms): need to pipe in keep from somewhere to set it for this generation
         self.update_keep(n_keep)
 
         num_tokens_to_exclude = max(num_tokens_to_exclude, 1)

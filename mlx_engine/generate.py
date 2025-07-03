@@ -137,6 +137,7 @@ def create_generator(
     max_tokens: Optional[int] = 10000000,
     speculative_decoding_toggle: Optional[bool] = None,
     num_draft_tokens: Optional[int] = None,
+    n_keep: int = 4,
 ) -> Iterator[GenerationResult]:
     """
     Create a generator that streams text generation results from the model.
@@ -193,6 +194,7 @@ def create_generator(
             value = getattr(model_kit, attr, None)
             if value is not None:
                 generate_args[attr] = value
+        generation_args["n_keep"] = n_keep
 
     # Set up repetition penalty
     repetition_penalty_kwargs = {}

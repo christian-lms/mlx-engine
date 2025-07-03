@@ -38,6 +38,7 @@ def process_prompt_text_only(
     prompt_tokens = cache_wrapper.update_cache(
         prompt_tokens,
         prompt_progress_callback,
+        n_keep=generate_args.getattr("n_keep", 4),
     )
     generate_args["prompt_cache"] = cache_wrapper.cache
     return prompt_tokens
