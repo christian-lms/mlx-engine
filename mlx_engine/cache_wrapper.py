@@ -2,14 +2,113 @@ from typing import List, Optional, Any
 
 from mlx_engine.logging import log_info, log_warn, log_error
 from mlx_lm.models.cache import (
-    make_prompt_cache,
     trim_prompt_cache,
     can_trim_prompt_cache,
+    RotatingKVCache,
+    KVCache
 )
 from mlx_lm.generate import generation_stream, maybe_quantize_kv_cache
 import mlx.core as mx
 import mlx.nn as nn
 import sys
+
+
+class TrimmableRotatingKVCache(RotatingKVCache):
+    def is_trimmable(self):
+        return True
+
+    def trim(self, n):
+        n = min(self.offset, n)
+        if n == 0:
+            return 0
+        
+        if self.offset >= self.max_size:
+            self.keys = self._temporal_order(self.keys)
+            self.values = self._temporal_order(self.values)
+            n = n % (self.max_size - self.keep)
+
+        # do trim: put us back into the state before the circular buffer is full
+        new_length = self.keys.shape[2] - n
+        self.keys = self.keys[..., :new_length, :]
+        self.values = self.values[..., :new_length, :]
+        
+        self.offset -= n
+        self._idx = new_length
+        return n
+
+    def trim_range(self, start, end):
+        # start is inclusive, end exclusive
+        original_start = start
+        original_end = end
+
+        if self.offset >= self.max_size:
+            self.keys = self._temporal_order(self.keys)
+            self.values = self._temporal_order(self.values)
+            start = start % (self.max_size - self.keep)
+            end = end % (self.max_size - self.keep)
+
+        if start >= end:
+            raise ValueError(f"Reuse trim received a request from {original_start} to "
+            f"{original_end} over a cache with max size {self.max_size} and keep {keep} "
+            f"which implies a trim from {start} to {end}. This is nonsensical.")
+
+        trim_count = end - start
+        
+        if start == 0:
+            # trim from beginning
+            self.keys = self.keys[..., end:, :]
+            self.values = self.values[..., end:, :]
+        elif end == self.keys.shape[2]:
+            # trim from end
+            self.keys = self.keys[..., :start, :]
+            self.values = self.values[..., :start, :]
+        else:
+            # trim from middle
+            self.keys = mx.concatenate([
+                self.keys[..., :start, :],
+                self.keys[..., end:, :]
+            ], axis=2)
+            self.values = mx.concatenate([
+                self.values[..., :start, :],
+                self.values[..., end:, :]
+            ], axis=2)
+        
+        self.offset -= trim_count
+        self._idx = self.keys.shape[2]
+        
+        return trim_count
+
+    def set_keep(keep: int)
+        self.keep = keep
+
+
+def make_prompt_cache(
+    model: nn.Module,
+    max_kv_size: Optional[int] = None,
+) -> List[Any]:
+    """
+    Construct the model's cache for use in generation.
+
+    This function will defer the cache construction to the model if it has a
+    ``make_cache`` method, otherwise it will make a default KV cache.
+
+    Args:
+        model (nn.Module): The language model.
+        max_kv_size (Optional[int]): If provided and the model does not have a
+            ``make_cache`` method, a ``TrimmableRotatingKVCache`` is used
+            with a maximum size of ``max_kv_size``
+    """
+    if hasattr(model, "make_cache"):
+        return model.make_cache()
+
+    num_layers = len(model.layers)
+    if max_kv_size is not None:
+        return [
+            # TODO(christian-lms): change keep on the fly
+            TrimmableRotatingKVCache(max_size=max_kv_size, keep=4) for _ in range(num_layers)
+        ]
+    else:
+        return [KVCache() for _ in range(num_layers)]
 
 
 class CacheWrapper:
@@ -124,7 +223,7 @@ class CacheWrapper:
                 log_error(
                     prefix="CacheWrapper",
                     message=f"Tokens trimmed from cache ({tokens_trimmed}) is less than expected "
-                    " ({num_tokens_to_trim}). Clearing the cache.",
+                    f" ({num_tokens_to_trim}). Clearing the cache.",
                 )
                 self.cache = make_prompt_cache(self.model, self.max_kv_size)
                 self.tokens = prompt_tokens
