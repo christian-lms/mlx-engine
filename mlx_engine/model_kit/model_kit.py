@@ -138,6 +138,7 @@ class ModelKit:
         prompt_progress_callback,
         generate_args,
         speculative_decoding_toggle: Optional[bool] = None,
+        n_keep: int = 4,
     ) -> Tuple[mx.array, Optional[mx.array]]:
         ### TEXT-ONLY PROCESS_PROMPT ###
         is_text_only_processing = images_b64 is None or len(images_b64) == 0
@@ -157,6 +158,7 @@ class ModelKit:
                 self.draft_model,
                 speculative_decoding_toggle,
                 prompt_progress_callback,
+                n_keep=n_keep,
             ), None
         ### WITH IMAGES PROMPT PROCESSING ###s
         if self.vision_add_on is None:

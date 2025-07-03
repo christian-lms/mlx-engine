@@ -13,6 +13,7 @@ def process_prompt_text_only(
     draft_model: Optional[nn.Module] = None,
     speculative_decoding_toggle: Optional[bool] = None,
     prompt_progress_callback: Optional[Callable[[float], None]] = None,
+    n_keep: int = 4,
 ):
     if cache_wrapper is None:
         raise ValueError("Cache wrapper is not initialized, cannot process prompt")
@@ -38,7 +39,7 @@ def process_prompt_text_only(
     prompt_tokens = cache_wrapper.update_cache(
         prompt_tokens,
         prompt_progress_callback,
-        n_keep=generate_args.getattr("n_keep", 4),
+        n_keep=n_keep
     )
     generate_args["prompt_cache"] = cache_wrapper.cache
     return prompt_tokens

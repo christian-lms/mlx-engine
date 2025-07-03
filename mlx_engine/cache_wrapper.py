@@ -32,7 +32,8 @@ class TrimmableRotatingKVCache(RotatingKVCache):
         self.keys = self.keys[..., :new_length, :]
         self.values = self.values[..., :new_length, :]
         
-        self.offset -= n
+        # stupid hacky workaround
+        self.offset = new_length
         self._idx = new_length
         return n
 

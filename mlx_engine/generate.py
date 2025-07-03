@@ -194,7 +194,6 @@ def create_generator(
             value = getattr(model_kit, attr, None)
             if value is not None:
                 generate_args[attr] = value
-        generation_args["n_keep"] = n_keep
 
     # Set up repetition penalty
     repetition_penalty_kwargs = {}
@@ -220,6 +219,7 @@ def create_generator(
         prompt_progress_callback,
         generate_args,
         speculative_decoding_toggle,
+        n_keep=n_keep,
     )
     if draft_model is None:
         # input embeddings not yet supported for speculative decoding in mlx-lm
